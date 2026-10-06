@@ -1,172 +1,328 @@
-# Smart Office Queue & Token Management System
+Smart Office Queue & Token Management System
+A full-stack office queue manager. Visitors pick a department, get a numbered token (IT-001, HR-002, ...) and watch their live queue position and estimated waiting time. Staff call, complete, skip (no-show) and transfer tokens. Admins pause/resume departments and see statistics.
 
-A full-stack office queue manager: visitors take a numbered token for a department and watch their live position; staff call, complete, skip and transfer tokens; admins pause departments and see statistics.
+Layer	Technology
+Frontend	Flutter (Dart), Material 3, Provider
+Backend	Go (REST API, JWT, layered architecture)
+Database	PostgreSQL (SQL migrations, FK + indexes, transactions)
+Table of contents
+Screenshots
+Requirements checklist
+Features
+Architecture
+Project structure
+Prerequisites
+Setup & run (step by step)
+Environment variables
+Test credentials
+Demo walkthrough
+Queue logic explained
+Database schema
+API documentation
+Testing
+Security
+Troubleshooting
+Known limitations
+1. Screenshots
 
-**Stack:** Flutter (Material 3, Provider) · Go (REST + JWT, layered) · PostgreSQL
+Home	
+Department selection (live waiting count, paused status)
 
-> **Status of this code.** The Go backend was compiled, unit-tested (16 tests) and exercised end to end against a real PostgreSQL 16 (36 API checks, `backend/scripts/smoke_test.py`). The Flutter app was written carefully but **could not be compiled in the authoring environment** - run `flutter analyze` first and fix any small issue it reports (see "Known limitations").
+Token details: live position and estimated wait	
+Staff dashboard: now serving, call next, complete, no-show
 
-## 1. Features
+Waiting queue (priority first, then FIFO)	
+Admin dashboard: totals, chart, department-wise statistics
 
-**Visitor** - home, department selection (live waiting count / paused status), token generation (normal or priority), token details with **live queue position and estimated wait**, cancel, follow a transfer to the new token, token history.
-**Staff** - own-department desk: now serving, waiting queue, *Call next*, *Complete*, *No show*, *Transfer*, token details, statistics.
-**Admin** - everything staff can do for any department, plus pause/resume departments, an overall dashboard, department-wise statistics and a chart.
+Paused department: new tokens are blocked	
+Transfer a token to another department
+2. Requirements checklist
+Requirement (from the assessment)	Where / how
+Visitor token generation	POST /api/tokens, Flutter "Generate token" screen
+Services: IT Support, HR, Accounts, Administration	seeded by migration 002_seed_departments.up.sql
+Unique token numbers (IT-001, HR-002 ...)	per-department atomic counter (departments.last_token_seq)
+Separate department-wise queues	every query is scoped by department_id
+Live queue position	computed on every request; app polls every 5 s
+Estimated waiting time	people ahead x average service time (see section 11)
+Token cancellation	visitors can cancel WAITING tokens only
+Admin / Staff login	JWT + bcrypt, role-based authorization
+Call Next Token	priority first, then FIFO; never while someone is being served
+Complete Token	SERVING -> COMPLETED, stores completed_at
+No Show: 1st moves to end, 2nd auto-cancels	backend logic + tests
+Transfer token to another department	new token in the target department, history kept
+Pause / resume a department	admin only; paused departments reject new tokens
+Priority token	ahead of normal tokens, never interrupts the one being served
+Dashboard: waiting, serving, completed, no-shows, average waiting time	admin dashboard + per-department statistics
+Queue position / ETA update when the queue changes	never stored, always recalculated
+3. Features
+Visitor (no account needed)
 
-## 2. Architecture
+Home, department selection with live waiting count / estimated wait / paused status
+Generate a normal or priority token
+Token details: token number, department, priority, status, queue position, people ahead, estimated wait, history timeline
+Cancel a waiting token (with confirmation)
+"It is your turn" banner when called, "moved to end of queue" notice after a no-show, follow a transferred token to its new number
+Staff (own department)
 
-```
- Flutter app                                   Go API                                   PostgreSQL
-┌───────────────────────┐   HTTP/JSON    ┌──────────────────────────────┐   pgx    ┌───────────────┐
-│ screens / widgets     │  (poll 5 s)    │ handler  (routes, JWT, JSON) │          │ departments   │
-│   ▲                   │ ─────────────► │    ▼                         │ ───────► │ users         │
-│ providers (Provider)  │                │ service  (ALL queue rules)   │          │ tokens        │
-│   ▲                   │ ◄───────────── │    ▼                         │ ◄─────── │ queue_events  │
-│ repositories          │                │ store.Repo (interface)       │          └───────────────┘
-│   ▲                   │                │    ▼                         │
-│ ApiClient (http)      │                │ store/postgres (SQL, tx)     │
-└───────────────────────┘                └──────────────────────────────┘
-```
-The backend is the **single source of truth**. Flutter never computes positions, ETAs or ordering; it renders what the API returns.
+Now serving, waiting queue, statistics
+Call next token, Complete, No show, Transfer (with department picker), token details and history
+Admin (all departments)
 
-## 3. Technology stack
-Flutter 3.22+ / Dart 3.4+, `provider`, `http`, `shared_preferences` · Go 1.22+, `net/http` (1.22 routing), `pgx/v5`, `golang-jwt/v5`, `bcrypt` · PostgreSQL 13+ (uses `gen_random_uuid()`).
+Everything staff can do, for any department (department switcher)
+Pause / resume departments (department management screen)
+Overall dashboard: waiting, serving, completed, no-shows, cancelled, average waiting time, simple bar chart, department-wise statistics
+4. Architecture
+ Flutter app                                    Go API                                    PostgreSQL
+┌────────────────────────┐   HTTP / JSON    ┌───────────────────────────────┐   pgx    ┌────────────────┐
+│ screens / widgets      │   (poll every    │ handler  routes, JWT, JSON    │          │ departments    │
+│        ▲               │    5 seconds)    │    │                          │ ───────► │ users          │
+│ providers (Provider)   │ ───────────────► │ service  ALL queue rules      │          │ tokens         │
+│        ▲               │                  │    │                          │ ◄─────── │ queue_events   │
+│ repositories           │ ◄─────────────── │ store.Repo  (interface)       │          └────────────────┘
+│        ▲               │                  │    │                          │
+│ ApiClient (http)       │                  │ store/postgres  SQL + tx      │
+└────────────────────────┘                  └───────────────────────────────┘
+The backend is the single source of truth. Flutter never computes positions, estimates or ordering; it only displays what the API returns. Live updates use simple polling (reliable, no WebSocket complexity).
 
-## 4. Database schema
-Full SQL: `database/schema.sql` (identical to `backend/migrations/*.up.sql`; the server applies migrations automatically at startup). All primary keys are **UUID**.
+5. Project structure
+smart-office-queue/
+├── backend/
+│   ├── cmd/server/main.go            # wiring: config, DB, migrations, seed, HTTP server
+│   ├── internal/
+│   │   ├── config/                   # environment variables (+ .env loader)
+│   │   ├── domain/                   # types and business errors
+│   │   ├── service/                  # QUEUE RULES live here (queue.go) + unit tests
+│   │   ├── store/                    # Repo interface
+│   │   ├── store/postgres/           # SQL implementation (transactions, row locks)
+│   │   ├── handler/                  # routes, JWT middleware, error mapping
+│   │   ├── auth/                     # bcrypt, JWT, login
+│   │   ├── seed/                     # demo users
+│   │   └── db/                       # migration runner
+│   ├── migrations/                   # 001_init.up.sql, 002_seed_departments.up.sql
+│   ├── scripts/smoke_test.py         # end-to-end API test
+│   ├── .env.example
+│   └── go.mod / go.sum
+├── frontend/
+│   ├── lib/
+│   │   ├── core/                     # theme, routes, config, status styles
+│   │   ├── models/
+│   │   ├── services/api_client.dart  # the only place that does HTTP
+│   │   ├── repositories/
+│   │   ├── providers/                # state + polling
+│   │   ├── screens/                  # 9 screens
+│   │   ├── widgets/
+│   │   └── utils/
+│   └── pubspec.yaml
+├── database/schema.sql               # full schema + department seed
+├── screenshots/
+├── docker-compose.yml                # optional PostgreSQL container
+├── .gitignore
+└── README.md
+6. Prerequisites
+Tool	Version	Check
+Go	1.22 or newer	go version
+PostgreSQL	13 or newer (uses gen_random_uuid())	psql --version
+Flutter SDK	3.22 or newer (tested with 3.47, Dart 3.13)	flutter --version
+Google Chrome	any recent version	for the Flutter web app
+Docker	optional	only for the PostgreSQL container
+7. Setup & run (step by step)
+You need three terminals at the end: PostgreSQL (service), backend, frontend.
 
-| table | key columns |
-|---|---|
-| `departments` | name, code (IT/HR/ACC/ADM), `is_paused`, `last_token_seq` (per-department counter), `default_service_minutes`, `sort_order` |
-| `users` | name, email (unique, case-insensitive), `password_hash` (bcrypt), `role` STAFF/ADMIN, `department_id` FK |
-| `tokens` | `token_number`, `department_id` FK, `priority` 0/1, `status`, `no_show_count`, `sequence_no`, `queue_entered_at`, `created_at`, `called_at`, `completed_at`, `cancelled_at`, `transferred_from_token_id` FK→tokens |
-| `queue_events` | `token_id` FK, `event_type`, `metadata` JSONB, `created_at` (audit / transfer history) |
+Step 1: PostgreSQL database
+Option A: Docker (creates user, password and database automatically)
 
-Notable constraints and indexes: `idx_tokens_queue_order (department_id, status, priority DESC, queue_entered_at, sequence_no)` serves exactly the queue ordering; **`uq_one_serving_per_department`** (partial unique index `WHERE status='SERVING'`) makes it impossible for the database to hold two serving tokens in one department; CHECK constraints on status/priority/role. Extra: `queue_entered_at` (explained below) and `sequence_no` (tie-breaker) are additions to the suggested fields.
+docker compose up -d
+Option B: local PostgreSQL
 
-## 5-6. Prerequisites and PostgreSQL setup
-Install Go 1.22+, Flutter, PostgreSQL 13+.
+psql -U postgres
+CREATE USER queue_user WITH PASSWORD 'change_me';
+CREATE DATABASE smart_office_queue OWNER queue_user;
+\q
+Windows: if psql is not recognized, add PostgreSQL to PATH for the current window, e.g. $env:Path += ";C:\Program Files\PostgreSQL\18\bin" (adjust the version number).
 
-```bash
-# Option A - Docker
-docker compose up -d                       # PostgreSQL on :5432 (matches .env.example)
+No manual schema step is needed: the backend applies the migrations (tables, indexes, the four departments) on first start. The same SQL is also available in database/schema.sql if you prefer to run it by hand: psql -U queue_user -d smart_office_queue -f database/schema.sql
 
-# Option B - local PostgreSQL
-psql -U postgres -c "CREATE USER queue_user WITH PASSWORD 'change_me'"
-psql -U postgres -c "CREATE DATABASE smart_office_queue OWNER queue_user"
-```
-No manual migration step: the server creates the tables and the four departments on first start.
-
-## 7. Environment variables (`backend/.env.example`)
-| variable | meaning |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string (required) |
-| `JWT_SECRET` | signing secret, ≥16 chars (required) - `openssl rand -hex 32` |
-| `JWT_TTL_HOURS` | token lifetime, default 12 |
-| `PORT` | default 8080 |
-| `CORS_ALLOWED_ORIGINS` | `*` for dev, or a comma-separated origin list |
-| `SEED_ON_START` / `SEED_PASSWORD` | create the demo users once, with this password |
-
-`cp backend/.env.example backend/.env` and edit. `.env` is git-ignored; no secret is in the source.
-
-## 8. Run the backend
-```bash
+Step 2: Run the backend (Go)
 cd backend
-cp .env.example .env          # edit DATABASE_URL / JWT_SECRET
-go mod tidy                   # downloads dependencies, creates go.sum
-go run ./cmd/server           # http://localhost:8080  (GET /api/health)
-go test ./...                 # queue-rule tests (no database needed)
-```
-Optional end-to-end check against the running server (fresh DB): `SEED_PASSWORD=Demo@12345 python3 scripts/smoke_test.py`.
+Create the environment file:
 
-## 9. Run the frontend
-```bash
+# Windows PowerShell
+copy .env.example .env
+# macOS / Linux
+cp .env.example .env
+Open .env and set at least a long random JWT_SECRET (16+ characters). Keep DATABASE_URL as it is if you used the user/password from Step 1. Then:
+
+go mod tidy
+go run ./cmd/server
+Expected output:
+
+applied migration 001_init.up.sql
+applied migration 002_seed_departments.up.sql
+seeded user admin@smartoffice.local (ADMIN)
+...
+Smart Office Queue API listening on http://localhost:8080
+Keep this terminal open. Check it in a browser: http://localhost:8080/api/departments should list the four departments.
+
+Windows: if go is not recognized, run $env:Path += ";C:\Program Files\Go\bin" in that window.
+
+Step 3: Run the frontend (Flutter)
+Open a new terminal:
+
 cd frontend
-flutter create . --platforms=web,android,ios   # one-time: generates platform folders (keeps lib/, pubspec.yaml)
+flutter create . --platforms=web      # one-time: generates the web/ platform folder (keeps lib/ and pubspec.yaml)
 flutter pub get
-flutter analyze
+flutter analyze                        # should report no errors
+Start the app:
+
 flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:8080
-# Android emulator: --dart-define=API_BASE_URL=http://10.0.2.2:8080
-```
+or serve it on a fixed port (handy for opening a second browser/incognito window):
 
-## 10. Default test credentials
-Created at first start when `SEED_ON_START=true`. Password = your `SEED_PASSWORD` (`Demo@12345` in `.env.example`; demo only).
+flutter run -d web-server --web-port 5000 --dart-define=API_BASE_URL=http://localhost:8080
+# then open http://localhost:5000
+Android emulator: use --dart-define=API_BASE_URL=http://10.0.2.2:8080 (add --platforms=web,android in the flutter create step).
 
-| role | email | department |
-|---|---|---|
-| Admin | `admin@smartoffice.local` | all |
-| Staff | `it.staff@smartoffice.local` | IT Support |
-| Staff | `hr.staff@smartoffice.local` | HR |
-| Staff | `accounts.staff@smartoffice.local` | Accounts |
-| Staff | `admin.staff@smartoffice.local` | Administration |
+Windows: if flutter is not recognized, run $env:Path += ";C:\src\flutter\bin" (path of your Flutter SDK).
 
+8. Environment variables
+Defined in backend/.env.example (copy to backend/.env; .env is git-ignored and never committed).
+
+Variable	Meaning	Default
+DATABASE_URL	PostgreSQL connection string (required)	none
+JWT_SECRET	signing secret, at least 16 characters (required). Generate: openssl rand -hex 32	none
+JWT_TTL_HOURS	login token lifetime	12
+PORT	API port	8080
+CORS_ALLOWED_ORIGINS	* for local development, or comma-separated origins	*
+SEED_ON_START	create the demo users once at startup	false
+SEED_PASSWORD	password used for the demo users (required when seeding)	none
+Flutter: API_BASE_URL is passed with --dart-define (default http://localhost:8080).
+
+9. Test credentials
+Demo users are created at the first backend start when SEED_ON_START=true. The password is whatever SEED_PASSWORD is set to (Demo@12345 in .env.example; demo value only).
+
+Role	Email	Department	Password
+Admin	admin@smartoffice.local	all departments	Demo@12345
+Staff	it.staff@smartoffice.local	IT Support	Demo@12345
+Staff	hr.staff@smartoffice.local	HR	Demo@12345
+Staff	accounts.staff@smartoffice.local	Accounts	Demo@12345
+Staff	admin.staff@smartoffice.local	Administration	Demo@12345
 Visitors need no account.
 
-## 11. API
-All errors: `{"error": {"code": "department_paused", "message": "..."}}`. IDs are UUIDs. 🔓 public · 👤 staff/admin JWT (`Authorization: Bearer …`, staff limited to own department) · 👑 admin.
+If you changed SEED_PASSWORD after the first start, the existing users keep the old password. Drop and recreate the database to re-seed.
 
-| method & path | who | notes |
-|---|---|---|
-| `POST /api/auth/login` | 🔓 | `{email,password}` → `{token,expires_at,user}` |
-| `GET /api/departments` · `GET /api/departments/{id}` | 🔓 | waiting count, serving token, paused, avg service time |
-| `POST /api/departments/{id}/pause` · `/resume` | 👑 | idempotent |
-| `POST /api/tokens` | 🔓 | `{department_id, priority:"NORMAL"\|"PRIORITY"}` → 201 · 409 `department_paused` |
-| `GET /api/tokens/{id}` | 🔓 | live `queue_position`, `people_ahead`, `estimated_wait_minutes`, `events` history |
-| `DELETE /api/tokens/{id}` · `POST /api/tokens/{id}/cancel` | 🔓 | WAITING tokens only |
-| `GET /api/queues/{departmentId}` | 🔓 | serving token + ordered waiting list + stats |
-| `POST /api/queues/{departmentId}/call-next` | 👤 | priority first, then FIFO |
-| `POST /api/tokens/{id}/call` | 👤 | call a specific token - allowed only if it is the head of the queue |
-| `POST /api/tokens/{id}/complete` · `/no-show` | 👤 | token must be SERVING |
-| `POST /api/tokens/{id}/transfer` | 👤 | `{target_department_id}` → `{old_token,new_token}` |
-| `GET /api/dashboard` | 👑 | totals + per-department statistics |
-| `GET /api/dashboard/{departmentId}` | 👤 | one department |
+10. Demo walkthrough
+Use two browser windows: a normal one (visitor) and an incognito one (staff), both on the same app URL.
 
-Status codes: 400 validation / invalid id / invalid transfer · 401 · 403 · 404 (unknown id, `queue_empty`) · 409 (`department_paused`, `serving_in_progress`, `token_serving`, `token_completed`, `token_cancelled`, `invalid_state`, `not_next_in_queue`) · 500 (details logged, never leaked).
+Visitor: Get a token -> IT Support -> Generate token (IT-001). Repeat for IT-002. Then create a third token with Priority switched on (IT-003). Open the token screen: position and estimated wait are shown.
+Staff (it.staff@smartoffice.local): Call next token -> IT-003 (the priority token) is served first. The visitor's screen changes to "Now serving" within 5 seconds.
+While IT-003 is being served, create another priority token as visitor: it waits and does not interrupt IT-003.
+No show on IT-003: it goes back to the very end of the queue (priority removed, no_show_count = 1). Call next -> IT-001.
+Serve IT-003 again and press No show a second time: it is cancelled and can never be called again.
+Transfer a waiting token to HR: it becomes HR-00x in HR's queue; the original token shows "Transferred" with a link to the new one.
+Admin (admin@smartoffice.local): open Department management, Pause HR. As a visitor try to get an HR token: temporarily unavailable. Tokens already in HR's queue stay. Resume HR to allow new tokens again.
+Admin dashboard: totals, chart and department-wise statistics (waiting, serving, completed, no-shows, average waiting time).
+11. Queue logic explained
+One ordering rule, used everywhere
 
-## 12. Queue logic explained (interview notes)
+WAITING tokens ORDER BY priority DESC, queue_entered_at ASC, sequence_no ASC
+Call next takes the first row. Queue position is 1 + number of waiting tokens before this one. Estimated wait is based on the same ordering, so they can never disagree.
+Positions are never stored. They are recalculated on every request, so they cannot become stale after a create / cancel / call / complete / no-show / transfer.
+Rule	How it works
+Normal queue	FIFO by queue_entered_at, ties broken by sequence_no
+Priority token	sorts before all normal tokens; FIFO among priority tokens. It only affects WAITING tokens, so a SERVING token is never interrupted
+Call next	refuses (409) while any token is SERVING; otherwise sets the first waiting token to SERVING and stores called_at
+Complete	SERVING -> COMPLETED, stores completed_at (service time = completed_at - called_at)
+1st no-show	no_show_count = 1, token goes back to WAITING at the very end of the queue (its priority is removed and queue_entered_at = now, otherwise a priority token would still sort ahead of normal ones)
+2nd no-show	no_show_count = 2, status CANCELLED; cancelled tokens are not WAITING, so they are never eligible for Call Next
+Cancel (visitor)	only WAITING tokens; serving, completed or cancelled tokens get a clear 409
+Transfer	only WAITING tokens; the original becomes TRANSFERRED (kept for history) and a new token with the next number of the target department is created (priority kept, linked by transferred_from_token_id). Rejected if the target is paused. Done in one transaction; history is stored in queue_events
+Pause	blocks new tokens and incoming transfers; tokens already queued stay and can still be served
+Estimated waiting time estimated_wait = people_ahead x average_service_minutes. The average is the real mean of completed_at - called_at once a department has at least 5 completed tokens (minimum 1 minute); before that the department default (5 minutes) is used. A priority token with nobody ahead of it shows "No wait".
 
-**One ordering rule, used everywhere:** `ORDER BY priority DESC, queue_entered_at ASC, sequence_no ASC` over tokens with status `WAITING`.
-- *Call next* = the first row. *Queue position* = 1 + how many waiting tokens sort before this one. *Estimated wait* = people ahead × average service time. All three use the same ordering, so they can never disagree.
-- **Positions are never stored.** They are computed on every request, so they cannot go stale after a create / cancel / call / complete / no-show / transfer. The Flutter app polls every 5 s (simple and reliable; no WebSocket complexity).
+Concurrency and transactions Every queue-changing operation runs in a transaction and first locks the department row (SELECT ... FOR UPDATE). This serializes changes per department: token numbers never duplicate (verified with 40 parallel requests) and two staff pressing Call next at the same time cannot both succeed. A partial unique index (uq_one_serving_per_department) makes it impossible for the database to hold two serving tokens in one department. Transfers lock both departments in sorted order to avoid deadlocks.
 
-**Priority:** a priority token sorts before normal ones (FIFO among priority tokens). It only affects `WAITING` tokens - a `SERVING` token is never touched, and *Call next* refuses (409) while someone is being served. Two protections: an application check under a lock, and the partial unique index in the database.
+12. Database schema
+Full SQL: database/schema.sql (identical to backend/migrations/*.up.sql). All primary keys are UUIDs.
 
-**No-show:** 1st → `no_show_count = 1`, status back to `WAITING`, `queue_entered_at = now` ⇒ the token sorts after everyone already waiting in its tier ("end of the queue"). 2nd → status `CANCELLED`; cancelled tokens are not `WAITING`, so they are never eligible. *Design decision:* a priority token that no-shows goes to the end of the **priority tier**, so it still sorts ahead of normal tokens.
+Table	Important columns
+departments	name, code (IT/HR/ACC/ADM), is_paused, last_token_seq, default_service_minutes, sort_order, created_at, updated_at
+users	name, email (unique, case-insensitive), password_hash (bcrypt), role (STAFF/ADMIN), department_id (FK)
+tokens	token_number, department_id (FK), priority (0 normal / 1 priority), status, no_show_count, sequence_no, queue_entered_at, created_at, called_at, completed_at, cancelled_at, transferred_from_token_id (FK to tokens)
+queue_events	token_id (FK), event_type, metadata (JSONB), created_at: audit and transfer history
+Statuses: WAITING, SERVING, COMPLETED, CANCELLED, TRANSFERRED. Indexes include idx_tokens_queue_order (department_id, status, priority DESC, queue_entered_at, sequence_no) plus indexes on department_id, status, priority, created_at. queue_entered_at and sequence_no are additions to the suggested fields (they make "move to end of queue" and tie-breaking exact).
 
-**Complete:** `SERVING → COMPLETED`, stores `completed_at`; service time = `completed_at − called_at`.
+13. API documentation
+Base URL http://localhost:8080. All errors share one JSON shape:
 
-**Cancel:** only `WAITING` tokens; serving/completed/cancelled get a specific 409.
+{ "error": { "code": "department_paused", "message": "this department is temporarily unavailable (paused)" } }
+IDs are UUIDs. Auth: Authorization: Bearer <token> from the login endpoint. Legend: public = no login, staff = staff/admin JWT (staff are limited to their own department), admin = admin JWT.
 
-**Transfer:** only `WAITING` tokens. The original token becomes `TRANSFERRED` (kept for history); a **new** token with the next number of the target department (e.g. `HR-004`) is created, linked by `transferred_from_token_id`, keeping its priority; its `queue_entered_at` is the transfer time. Paused target ⇒ 409. Events `TRANSFERRED_OUT/IN` store the history. All in one transaction.
+Method and path	Access	Description
+POST /api/auth/login	public	{email, password} -> {token, expires_at, user}
+GET /api/departments	public	list with waiting count, serving token, paused flag, estimated wait
+GET /api/departments/{id}	public	one department
+POST /api/departments/{id}/pause	admin	pause (idempotent)
+POST /api/departments/{id}/resume	admin	resume (idempotent)
+POST /api/tokens	public	{department_id, priority: "NORMAL"|"PRIORITY"} -> 201; 409 if paused
+GET /api/tokens/{id}	public	token with live queue_position, people_ahead, estimated_wait_minutes, events
+DELETE /api/tokens/{id}	public	cancel a waiting token
+POST /api/tokens/{id}/cancel	public	same as DELETE
+GET /api/queues/{departmentId}	public	serving token + ordered waiting list + statistics
+POST /api/queues/{departmentId}/call-next	staff	call the head of the queue
+POST /api/tokens/{id}/call	staff	call a specific token (only if it is the head of the queue)
+POST /api/tokens/{id}/complete	staff	complete the serving token
+POST /api/tokens/{id}/no-show	staff	mark no-show (1st: to end of queue, 2nd: cancelled)
+POST /api/tokens/{id}/transfer	staff	{target_department_id} -> {old_token, new_token}
+GET /api/dashboard	admin	totals and department-wise statistics
+GET /api/dashboard/{departmentId}	staff	statistics of one department
+GET /api/health	public	health check
+Status codes 200 OK, 201 created, 400 validation / invalid id / invalid transfer, 401 not authenticated, 403 not allowed, 404 not found or queue_empty, 409 conflict (department_paused, serving_in_progress, token_serving, token_completed, token_cancelled, invalid_state, not_next_in_queue), 500 internal error (details are logged, never returned to the client).
 
-**Pause:** blocks *new* tokens and incoming transfers; existing tokens stay queued and can still be served.
+Example
 
-**Estimated wait:** `ahead × avg_service_minutes`. The average is the real mean of `completed_at − called_at` once the department has ≥5 completions (minimum 1 min), otherwise the department default (5 min). Priority is respected because "ahead" comes from the ordered queue (a priority token with nobody priority-ahead shows 0).
+curl -X POST http://localhost:8080/api/tokens \
+  -H "Content-Type: application/json" \
+  -d '{"department_id":"<uuid from /api/departments>","priority":"NORMAL"}'
+14. Testing
+Backend unit tests (queue rules, no database needed)
 
-**Concurrency / transactions:** every queue-changing operation runs in a transaction and first locks the department row (`SELECT … FOR UPDATE`). This serialises changes per department: token numbers (`IT-001…`, from an atomic counter) never duplicate (tested with 40 parallel requests), and two staff pressing *Call next* cannot both succeed. Transfers lock both departments in sorted order to avoid deadlocks.
+cd backend
+go test ./...
+Covered: per-department token numbers, FIFO, priority ordering, priority never interrupts the serving token, 1st no-show moves to the end (also for priority tokens), 2nd no-show cancels, paused department rejects new tokens, cancellation rules, transfer (and invalid / paused transfers), cannot call next while serving, estimated waiting time, complete rules, staff authorization, dashboard statistics.
 
-**Security:** bcrypt passwords, HS256 JWT (algorithm pinned, expiry checked), role middleware + per-department authorization in the service, parameterised SQL only, strict JSON decoding, secrets only from environment. Token IDs are random UUIDs, so a visitor can only cancel a token whose id they hold.
+End-to-end API test against a running backend and a fresh database (about 40 checks over HTTP + PostgreSQL):
 
-## 13. Important files
-| file | why it matters |
-|---|---|
-| `backend/internal/service/queue.go` | **all business rules** (read this first) |
-| `backend/internal/service/queue_test.go` + `fake_repo_test.go` | rule tests on an in-memory store |
-| `backend/internal/store/postgres/postgres.go` | the SQL: ordering, position, stats, locking |
-| `backend/internal/store/store.go` | repository interface (what makes the service testable) |
-| `backend/internal/handler/*` | routes, auth middleware, error→HTTP mapping |
-| `backend/internal/auth/auth.go` | bcrypt + JWT + login |
-| `backend/migrations/001_init.up.sql` | schema, indexes, constraints |
-| `frontend/lib/services/api_client.dart` | the only place that does HTTP |
-| `frontend/lib/providers/*` | state + polling (`utils/poller.dart`) |
-| `frontend/lib/screens/*` | the nine screens |
+cd backend
+SEED_PASSWORD='Demo@12345' python3 scripts/smoke_test.py http://localhost:8080
+(Windows PowerShell: $env:SEED_PASSWORD='Demo@12345'; python scripts\smoke_test.py http://localhost:8080)
 
-## 14. Screenshots
-Add images to `screenshots/` after running the app (folder is empty in this delivery).
+Frontend
 
-## 15. Known limitations
-- **Flutter code is not compile-verified** (see top). Run `flutter analyze`; likely issues are deprecation warnings (`withOpacity`, `DropdownButtonFormField.value`) on very new Flutter versions.
-- Live updates use 5-second polling, not push.
-- JWT is kept in `shared_preferences` (use secure storage in production); no refresh tokens or password change/reset UI.
-- Token counters never reset (no daily reset); statistics are all-time, not per day.
-- Backend tests cover rules on an in-memory fake store; SQL is covered by `scripts/smoke_test.py`, not Go integration tests. No Flutter widget tests beyond small unit tests.
-- Any visitor with a token id can cancel it (ids are unguessable UUIDs, but there is no further visitor auth).
+cd frontend
+flutter analyze     # no errors (only info-level deprecation hints on very new Flutter versions)
+flutter test
+15. Security
+Passwords hashed with bcrypt; no plaintext passwords anywhere in the source
+JWT (HS256, algorithm pinned, expiry checked); staff/admin endpoints are protected, role-based authorization plus per-department checks (staff can only manage their own department)
+Parameterized SQL only; strict JSON decoding with a request size limit; input validation (UUIDs, enums)
+Secrets only from environment variables; .env is git-ignored and .env.example is provided
+Token IDs are random UUIDs, so a visitor can only act on a token whose ID they hold
+Unknown errors are logged server-side and returned to the client as a generic 500
+16. Troubleshooting
+Problem	Fix
+DATABASE_URL is required	the backend must be started from the backend/ folder, where .env lives
+JWT_SECRET ... at least 16 characters	set a longer JWT_SECRET in .env
+database ping failed / connection refused	PostgreSQL is not running. Start the service (Windows: Services -> postgresql-x64-xx -> Start) or docker compose up -d
+password authentication failed	the password in DATABASE_URL must match the PostgreSQL user's password
+Login says "invalid email or password"	use the password from SEED_PASSWORD; users are only created on the first start with SEED_ON_START=true
+Port 8080 is busy	set PORT=8081 in .env and pass --dart-define=API_BASE_URL=http://localhost:8081
+App shows "Cannot reach the server"	the backend is not running, or API_BASE_URL is wrong (Android emulator needs 10.0.2.2)
+go / flutter / psql not recognized	the tool is not on PATH. Add its bin folder to PATH (see Step 1-3 notes) and open a new terminal
+Blank white page for ~20 s on first load	normal for the first Flutter web build; wait or refresh
+Need a clean database	DROP DATABASE smart_office_queue; then create it again (Step 1) and restart the backend
+17. Known limitations
+Live updates use 5-second polling instead of WebSockets (simple and reliable; a push channel would be a possible improvement)
+The JWT is kept in shared_preferences (use secure storage in production); no refresh tokens, no password change/reset screen
+Token counters never reset (no daily reset) and statistics are all-time, not per day
+Backend unit tests run on an in-memory fake store; the SQL is covered by the end-to-end script rather than Go integration tests. Flutter has only small unit tests, no widget tests
+Any visitor who holds a token ID can cancel that token (IDs are unguessable UUIDs, but there is no further visitor authentication)
+flutter analyze may show info-level deprecation hints (for example withOpacity) on very new Flutter versions; they do not affect behavior
