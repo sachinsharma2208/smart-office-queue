@@ -1,0 +1,16 @@
+# Optional: PostgreSQL only (the Go API and Flutter app run on your machine).
+#   docker compose up -d
+# Matches backend/.env.example (change the password in both places).
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: queue_user
+      POSTGRES_PASSWORD: change_me
+      POSTGRES_DB: smart_office_queue
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:

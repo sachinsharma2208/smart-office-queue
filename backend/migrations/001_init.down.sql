@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS queue_events;
+DROP TABLE IF EXISTS tokens;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS departments;

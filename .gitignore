@@ -1,0 +1,30 @@
+# secrets
+.env
+*.env
+!.env.example
+
+# Go
+backend/bin/
+backend/server
+*.test
+*.out
+
+# Flutter / Dart
+frontend/.dart_tool/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+frontend/build/
+frontend/.idea/
+frontend/pubspec.lock
+frontend/android/
+frontend/ios/
+frontend/web/
+frontend/windows/
+frontend/linux/
+frontend/macos/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
