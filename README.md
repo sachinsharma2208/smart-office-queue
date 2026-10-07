@@ -192,7 +192,6 @@ CREATE DATABASE smart_office_queue OWNER queue_user;
 > `$env:Path += ";C:\Program Files\PostgreSQL\18\bin"` (adjust the version number).
 
 No manual schema step is needed: the backend applies the migrations (tables, indexes, the four departments) on first start. The same SQL is also available in `database/schema.sql` if you prefer to run it by hand:
-`psql -U queue_user -d smart_office_queue -f database/schema.sql`
 
 ### Step 2: Run the backend (Go)
 
@@ -227,7 +226,7 @@ Smart Office Queue API listening on http://localhost:8080
 
 Open a **new** terminal:
 ```bash
-cd frontend
+
 flutter create . --platforms=web      # one-time: generates the web/ platform folder (keeps lib/ and pubspec.yaml)
 flutter pub get
 flutter analyze                        # should report no errors

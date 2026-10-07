@@ -28,3 +28,4 @@ frontend/macos/
 .idea/
 .vscode/
 .DS_Store
+RUN-NOTES.md
